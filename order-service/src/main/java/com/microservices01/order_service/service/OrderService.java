@@ -11,6 +11,10 @@ import com.microservices01.order_service.entity.Orderr;
 import com.microservices01.order_service.repository.OrderRepository;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -51,9 +55,18 @@ public class OrderService {
         return orderRepo.findAll();
     }
 
+    public Page<Orderr> getAllOrders(int pageNo, int pageSize) {
+        Pageable pageable = PageRequest.of(pageNo, pageSize);
+        return orderRepo.findAll(pageable);
+    }
+
     public Orderr getOrderById(Long id){
         Optional<Orderr> o = orderRepo.findById(id);
         return o.get();
+    }
+
+    public List<Orderr> getAllSortedOrders(String field){
+        return orderRepo.findAll(Sort.by(field));
     }
 
 }
