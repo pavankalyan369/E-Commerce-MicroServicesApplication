@@ -1,26 +1,20 @@
 package com.microservices01.order_service.service;
 
 import com.microservices01.order_service.client.ProductClient;
-import com.microservices01.order_service.client.ProductClientRestTemplate;
 import com.microservices01.order_service.client.UserClient;
-import com.microservices01.order_service.client.UserClientRestTemplate;
 import com.microservices01.order_service.dto.OrderDto;
+import com.microservices01.order_service.dto.OrderRequestDto;
 import com.microservices01.order_service.dto.ProductDto;
 import com.microservices01.order_service.dto.UserDto;
+import com.microservices01.order_service.entity.OrderStatus;
 import com.microservices01.order_service.entity.Orderr;
+import com.microservices01.order_service.entity.PaymentStatus;
 import com.microservices01.order_service.repository.OrderRepository;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Sort;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
-import java.util.Optional;
+import java.util.stream.Collectors;
 
 @Service
 public class OrderService {
@@ -29,44 +23,170 @@ public class OrderService {
     private OrderRepository orderRepo;
 
     @Autowired
-    private UserClientRestTemplate userClient;
+    private UserClient userClient;
 
     @Autowired
-    private ProductClientRestTemplate productClient;
+    private ProductClient productClient;
 
-    public void createOrder(OrderDto orderDto){
-        UserDto userDto = userClient.getUserById(orderDto.getUserId());
-        ProductDto productDto = productClient.getProductById(orderDto.getProductId());
-        Orderr order = new Orderr();
-        order.setUserId(userDto.getId());
-        order.setUserName(userDto.getName());
-        order.setProductId(productDto.getId());
-        order.setProductName(productDto.getName());
-        order.setType(productDto.getType());
-        order.setQuantity(orderDto.getQuantity());
-        order.setPrice(orderDto.getQuantity()*productDto.getPrice());
-        order.setAdress(userDto.getAdress());
-        order.setPin(userDto.getPin());
+    // ------------ CREATE ------------ //
 
-        orderRepo.save(order);
+    public OrderDto createOrder(OrderRequestDto req) {
+
+        UserDto user = userClient.getUserById(req.getUserId());
+        ProductDto product = productClient.getProductById(req.getProductId());
+
+        if (product.getStock() != null && product.getStock() < req.getQuantity()) {
+            throw new RuntimeException("Insufficient stock for product id: " + product.getId());
+        }
+
+        Long totalAmount = req.getQuantity() * product.getPrice();
+
+        Orderr order = Orderr.builder()
+                .userId(user.getId())
+                .userName(user.getName())
+                .userEmail(user.getEmail())
+                .userPhone(user.getPhone())
+                .adress(user.getAdress())
+                .pin(user.getPin())
+
+                .productId(product.getId())
+                .productName(product.getName())
+                .productType(product.getType())
+
+                .quantity(req.getQuantity())
+                .price(product.getPrice())
+                .totalAmount(totalAmount)
+
+                .status(OrderStatus.CREATED)
+                .paymentStatus(PaymentStatus.PENDING)
+                .paymentMode(req.getPaymentMode())
+                .trackingNumber(null)
+                .build()
+                ;
+
+        Orderr saved = orderRepo.save(order);
+
+        // NOTE: here you *could* call product-service PATCH /products/{id}/stock?delta=-quantity
+        // via another Feign client if you want to auto-reduce stock.
+
+        return mapToDto(saved);
     }
 
-    public List<Orderr> getAllOrders(){
-        return orderRepo.findAll();
+    // ------------ READ ------------ //
+
+    public List<OrderDto> getAllOrders() {
+        return orderRepo.findAll().stream()
+                .map(this::mapToDto)
+                .collect(Collectors.toList());
     }
 
-    public Page<Orderr> getAllOrders(int pageNo, int pageSize) {
-        Pageable pageable = PageRequest.of(pageNo, pageSize);
-        return orderRepo.findAll(pageable);
+    public OrderDto getOrderById(Long id) {
+        Orderr order = orderRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Order not found with id: " + id));
+        return mapToDto(order);
     }
 
-    public Orderr getOrderById(Long id){
-        Optional<Orderr> o = orderRepo.findById(id);
-        return o.get();
+    public List<OrderDto> getOrdersByUserId(Long userId) {
+        return orderRepo.findByUserId(userId)
+                .stream()
+                .map(this::mapToDto)
+                .collect(Collectors.toList());
     }
 
-    public List<Orderr> getAllSortedOrders(String field){
-        return orderRepo.findAll(Sort.by(field));
+    public List<OrderDto> getOrdersByStatus(OrderStatus status) {
+        return orderRepo.findByStatus(status)
+                .stream()
+                .map(this::mapToDto)
+                .collect(Collectors.toList());
     }
 
+    // ------------ DELETE ------------ //
+
+    public void deleteOrder(Long id) {
+        if (!orderRepo.existsById(id)) {
+            throw new RuntimeException("Order not found with id: " + id);
+        }
+        orderRepo.deleteById(id);
+    }
+
+    // ------------ PATCH HELPERS ------------ //
+
+    public OrderDto updateStatus(Long id, OrderStatus status) {
+        Orderr order = orderRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Order not found with id: " + id));
+        order.setStatus(status);
+        return mapToDto(orderRepo.save(order));
+    }
+
+    public OrderDto cancelOrder(Long id) {
+        Orderr order = orderRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Order not found with id: " + id));
+
+        if (order.getStatus() == OrderStatus.SHIPPED || order.getStatus() == OrderStatus.DELIVERED) {
+            throw new RuntimeException("Cannot cancel order in status: " + order.getStatus());
+        }
+        order.setStatus(OrderStatus.CANCELLED);
+        order.setPaymentStatus(PaymentStatus.REFUNDED);  // or keep as PENDING for COD etc.
+
+        return mapToDto(orderRepo.save(order));
+    }
+
+    public OrderDto patchShipping(Long id, String adress, Long pin, String phone) {
+        Orderr order = orderRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Order not found with id: " + id));
+
+        if (adress != null) order.setAdress(adress);
+        if (pin != null) order.setPin(pin);
+        if (phone != null) order.setUserPhone(phone);
+
+        return mapToDto(orderRepo.save(order));
+    }
+
+    public OrderDto patchPaymentStatus(Long id, PaymentStatus paymentStatus) {
+        Orderr order = orderRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Order not found with id: " + id));
+
+        order.setPaymentStatus(paymentStatus);
+        return mapToDto(orderRepo.save(order));
+    }
+
+    public OrderDto patchTrackingNumber(Long id, String trackingNumber) {
+        Orderr order = orderRepo.findById(id)
+                .orElseThrow(() -> new RuntimeException("Order not found with id: " + id));
+
+        order.setTrackingNumber(trackingNumber);
+        return mapToDto(orderRepo.save(order));
+    }
+
+    // ------------ MAPPER ------------ //
+
+    private OrderDto mapToDto(Orderr order) {
+        OrderDto dto = new OrderDto();
+
+        dto.setId(order.getId());
+        dto.setUserId(order.getUserId());
+        dto.setUserName(order.getUserName());
+        dto.setUserEmail(order.getUserEmail());
+        dto.setUserPhone(order.getUserPhone());
+        dto.setAdress(order.getAdress());
+        dto.setPin(order.getPin());
+
+        dto.setProductId(order.getProductId());
+        dto.setProductName(order.getProductName());
+        dto.setProductType(order.getProductType());
+
+        dto.setQuantity(order.getQuantity());
+        dto.setPrice(order.getPrice());
+        dto.setTotalAmount(order.getTotalAmount());
+
+        dto.setStatus(order.getStatus());
+        dto.setPaymentStatus(order.getPaymentStatus());
+        dto.setPaymentMode(order.getPaymentMode());
+        dto.setTrackingNumber(order.getTrackingNumber());
+
+        dto.setCreatedAt(order.getCreatedAt());
+        dto.setUpdatedAt(order.getUpdatedAt());
+
+        return dto;
+    }
 }
