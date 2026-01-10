@@ -84,7 +84,5 @@ A scalable and secure e-commerce application developed using Java, Spring Boot, 
 - Order Service  
   Responsible for order creation, processing, and order history management.
 
----
 
-## Project Structure
 
